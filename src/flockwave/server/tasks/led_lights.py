@@ -137,8 +137,8 @@ class LEDLightConfigurationManagerBase(Generic[TPacket], metaclass=ABCMeta):
     def __init__(self):
         """Constructor."""
         self.message_interval = 3
-        self.message_interval_in_rapid_mode = 0.2
-        self.rapid_mode_duration = 5
+        self.message_interval_in_rapid_mode = 1
+        self.rapid_mode_duration = 3
 
         self._active = False
         self._config = None

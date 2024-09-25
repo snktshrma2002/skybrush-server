@@ -83,6 +83,11 @@ from .utils import (
     mavlink_version_number_to_semver,
 )
 
+
+
+
+import trio
+
 __all__ = ("MAVLinkDriver",)
 
 
@@ -111,7 +116,7 @@ def transport_options_to_channel(options: Optional[TransportOptions]) -> str:
     else:
         return Channel.PRIMARY
 
-
+flag = 0
 class MAVLinkDriver(UAVDriver["MAVLinkUAV"]):
     """Driver class for MAVLink-based drones.
 
@@ -157,6 +162,9 @@ class MAVLinkDriver(UAVDriver["MAVLinkUAV"]):
         self._default_timeout = 2
         self._default_retries = 5
         self._default_delay = 0.1
+        
+        self.nursery = None  # Nursery to handle parallel uploads
+        
 
     async def broadcast_command_long_with_retries(
         self,
@@ -262,6 +270,7 @@ class MAVLinkDriver(UAVDriver["MAVLinkUAV"]):
                 self.log.warning("Failed to send broadcast command")
 
     def create_uav(self, id: str) -> "MAVLinkUAV":
+        self.run_in_background(self.manage_nursery)
         """Creates a new UAV that is to be managed by this driver.
 
         Parameters:
@@ -334,14 +343,29 @@ class MAVLinkDriver(UAVDriver["MAVLinkUAV"]):
         Parameters:
             show: the show data
         """
+        global flag
+        print(uav._system_id)
+        # flag += 1
+        # print(flag)
+        
+        if self.nursery is not None:
+            self.nursery.start_soon(self.upload_single_uav, uav, show)  # Add to nursery
+    
+    async def upload_single_uav(self, uav: "MAVLinkUAV", show):
+        """Uploads show to a single UAV, with error handling."""
         try:
-            await uav.upload_show(show)
-        except TooSlowError as ex:
-            self.log.error(str(ex))
-            raise
+            await uav.upload_show(show)  # Actual show upload function
+        except trio.TooSlowError as ex:
+            self.log.error(f"Upload for UAV {uav._system_id} timed out: {str(ex)}")
         except Exception as ex:
-            self.log.error(str(ex))
-            raise
+            self.log.error(f"Upload for UAV {uav._system_id} failed: {str(ex)}")
+
+    async def manage_nursery(self):
+        """Manages a trio nursery that handles parallel uploads."""
+        async with trio.open_nursery() as nursery:
+            self.nursery = nursery  # Save the nursery for future use
+            await trio.sleep_forever()
+            
 
     async def send_command_int(
         self,
@@ -1969,7 +1993,7 @@ class MAVLinkUAV(UAVBase):
                     self,
                     MAVCommand.SET_MESSAGE_INTERVAL,
                     message,
-                    1000000 / rate,  # one per second
+                    1000000 / 0.1,  # one per second
                 )
                 if success:
                     successful.append(message)
@@ -2111,9 +2135,6 @@ class MAVLinkUAV(UAVBase):
             try:
                 await self._configure_data_streams_with_fine_grained_commands()
                 success = True
-            except NotSupportedError:
-                await self._configure_data_streams_with_legacy_commands()
-                success = True
             except TooSlowError:
                 # attempt timed out, even after retries, so we just give up
                 pass
@@ -2133,10 +2154,17 @@ class MAVLinkUAV(UAVBase):
         """Configures the intervals of the messages that we want to receive from
         the UAV using the newer `SET_MESSAGE_INTERVAL` MAVLink command.
         """
+        
+        print("____________________________+++++++++++++++++++++++++++++++++++++++=+_____________________---")
         stream_rates = [
             (MAVMessageType.SYS_STATUS, 1),
             (MAVMessageType.GPS_RAW_INT, 1),
             (MAVMessageType.GLOBAL_POSITION_INT, 2),
+            (MAVMessageType.HEARTBEAT, 2),
+            (MAVMessageType.SYS_STATUS, 2),
+            (MAVMessageType.AUTOPILOT_VERSION, 2),
+            (MAVMessageType.DATA_STREAM, 2),
+
         ]
 
         for message_id, interval_hz in stream_rates:
@@ -2144,7 +2172,7 @@ class MAVLinkUAV(UAVBase):
                 self,
                 MAVCommand.SET_MESSAGE_INTERVAL,
                 param1=message_id,
-                param2=1000000 / interval_hz,
+                param2=1000000 / 0.1,
             )
 
             if not success:
@@ -2170,7 +2198,7 @@ class MAVLinkUAV(UAVBase):
         await self.driver.send_packet(
             spec.request_data_stream(
                 req_stream_id=MAVDataStream.EXTENDED_STATUS,
-                req_message_rate=1,
+                req_message_rate=0.1,
                 start_stop=1,
             ),
             target=self,
@@ -2180,7 +2208,7 @@ class MAVLinkUAV(UAVBase):
         await self.driver.send_packet(
             spec.request_data_stream(
                 req_stream_id=MAVDataStream.POSITION,
-                req_message_rate=2,
+                req_message_rate=0.2,
                 start_stop=1,
             ),
             target=self,
